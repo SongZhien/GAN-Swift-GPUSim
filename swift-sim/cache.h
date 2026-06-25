@@ -216,6 +216,7 @@ public:
                 break;
             case 1:
                 scheduler_type = DRAM_FRFCFS;
+                break;
             default:
                 printf("error config: memory config scheduler_type");
                 exit(1);
@@ -253,7 +254,7 @@ public:
             tWTR = (WL + (BL / data_command_freq_ratio) + tCDLR);
         }
         tWTP = (WL + (BL / data_command_freq_ratio) + tWR);
-        simple_dram_model = 0;
+        simple_dram_model = m_gpu_config.memory_config["simple_dram_model"];
     }
 
     dram_ctrl_t scheduler_type;
@@ -481,6 +482,11 @@ public:
         m_mshrs = new mshr_table(cache_config.m_mshr_entries, cache_config.m_mshr_max_merge);
     }
 
+    virtual ~data_cache() {
+        delete m_tag_array;
+        delete m_mshrs;
+    }
+
     cache_config m_cache_config;
     gpu_config m_gpu_config;
     unsigned sm_id;
@@ -506,6 +512,23 @@ public:
         m_tlb_hit = false;
         m_l1_to_l2_num = 0;
         m_l1_to_l2_mshr = 0;
+    }
+
+    ~l1_data_cache() override {
+        for (auto &bank_queue : m_sm_to_l1) {
+            while (!bank_queue.second.empty()) {
+                delete bank_queue.second.front();
+                bank_queue.second.pop();
+            }
+        }
+        while (!m_miss_queue.empty()) {
+            delete m_miss_queue.front();
+            m_miss_queue.pop();
+        }
+        while (!l1_to_sm.empty()) {
+            delete l1_to_sm.front();
+            l1_to_sm.pop();
+        }
     }
 
     bool m_tlb_hit;
@@ -539,10 +562,7 @@ public:
         }
     }
 
-    ~l2_data_cache(){
-        delete m_L2_dram_queue;
-        delete m_dram_L2_queue;
-    }
+    ~l2_data_cache() override;
 
     void init(memory_partition* mem){
         m_mem_partition = mem;
@@ -600,10 +620,20 @@ public:
     memory_partition(const cache_config &cache_config, const gpu_config &gpu_config, const memory_config *config, const gpu* gpu);
 
     ~memory_partition(){
-        delete m_dram;
+        const int dram_count = std::stoi(m_gpu_config.m_gpu_config["mem_num"]) /
+                               m_config->m_n_sub_partition_per_memory_channel;
+        for (int i = 0; i < dram_count; i++) {
+            m_dram_latency_queue[i].clear();
+        }
+        for (int i = 0; i < dram_count; i++) {
+            delete m_dram[i];
+        }
+        delete[] m_dram;
         for(int i = 0; i< std::stoi(m_gpu_config.m_gpu_config["mem_num"]); i++) {
             delete m_l2_caches[i];
         }
+        delete[] m_dram_latency_queue;
+        delete[] last_issued_partition;
     }
 
     void print_stats();

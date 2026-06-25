@@ -226,8 +226,9 @@ unsigned l1_data_cache::cache_access(new_addr_type addr, mem_fetch *mf, unsigned
                     auto *mf_write_through = new mem_fetch(sm_id, mf->m_access_type, mf->m_address, mf->m_sector_mask, mf->m_space,
                              mf->m_is_atomic, mf->m_gen_time, mf->m_src_block_id, mf->m_src_warp_id,
                              mf->m_completion_index, m_gpu);
-                   mf_write_through->m_write_type = WRITE_THROUGH_L2;
-                   m_miss_queue.push(mf_write_through);
+	                   mf_write_through->m_write_type = WRITE_THROUGH_L2;
+	                   mf_write_through->m_no_reply = true;
+	                   m_miss_queue.push(mf_write_through);
                    block->set_status(MODIFIED, mf->m_sector_mask);
                 } else if (mf->m_space == LOCAL) {
                     m_tag_array->tag_array_access(block_addr, time, mf, cache_index);
@@ -246,9 +247,13 @@ unsigned l1_data_cache::cache_access(new_addr_type addr, mem_fetch *mf, unsigned
                 printf("l1_hit_latency does not exist!\n");
                 exit(1);
             }
-            mf->m_l1_ready_time = std::stoi(m_gpu_config.m_gpu_config["l1_hit_latency"])+(int)time;
-            l1_to_sm.push(mf);
-            return HIT;
+	            mf->m_l1_ready_time = std::stoi(m_gpu_config.m_gpu_config["l1_hit_latency"])+(int)time;
+	            if (mf->needs_reply()) {
+	                l1_to_sm.push(mf);
+	            } else {
+	                delete mf;
+	            }
+	            return HIT;
         } else {
             // m_gpu->address_to_sms[addr].insert(sm_id);
             new_addr_type mshr_addr = m_cache_config.mshr_addr(mf->m_sector_address);
@@ -319,11 +324,12 @@ void l1_data_cache::l1_cache_cycle(int cycles) {
     for (int bank = 0; bank < m_cache_config.m_n_banks; bank++) {
         if (!m_sm_to_l1[bank].empty()) {
             mem_fetch *mf = m_sm_to_l1[bank].front();
+            new_addr_type mf_address = mf->m_address;
             unsigned  status = cache_access(mf->m_address, mf, cycles);
             if(status == RESERVATION_FAIL)
                 continue;
             else{
-                m_gpu->address_to_sms[mf->m_address].insert(sm_id);
+                m_gpu->address_to_sms[mf_address].insert(sm_id);
                 m_gpu->total_access++;
                 m_sm_to_l1[bank].pop();
             }
@@ -350,19 +356,61 @@ void l1_data_cache::cache_fill(mem_fetch *mf, unsigned time) {
     m_tag_array->tag_array_fill(mf->m_address, time, mf->m_sector_mask);
 }
 
-void l2_data_cache::l2_cache_cycle(int cycles) {
-    if(!m_dram_L2_queue->empty()){
-        mem_fetch *mf = m_dram_L2_queue->top();
-        m_gpu->m_icnt->Push(m_device_id,mf->m_sm_id,mf, mf->m_packet_size);
-
-
-        new_addr_type mshr_address = mf->m_sector_address;
-        while (m_mshrs->probe(mshr_address)){
-            mem_fetch *mf_fill = m_mshrs->next_access(mshr_address);
-            cache_fill(mf_fill, cycles); // L2 fill
-        }
-        m_dram_L2_queue->pop();
+l2_data_cache::~l2_data_cache() {
+    while (!m_l1_to_l2.empty()) {
+        delete m_l1_to_l2.front();
+        m_l1_to_l2.pop();
     }
+    for (auto &queue : l2_to_sms) {
+        while (!queue.empty()) {
+            delete queue.front();
+            queue.pop();
+        }
+    }
+    for (auto &entry : l2_to_dram) {
+        delete entry.first;
+    }
+    while (!m_L2_dram_queue->empty()) {
+        delete m_L2_dram_queue->pop_no_replenish();
+    }
+    while (!m_dram_L2_queue->empty()) {
+        delete m_dram_L2_queue->pop_no_replenish();
+    }
+    delete m_L2_dram_queue;
+    delete m_dram_L2_queue;
+}
+
+static void return_l2_miss_to_sms(l2_data_cache *cache, mem_fetch *returned_mf, int cycles) {
+    new_addr_type mshr_address = cache->m_cache_config.mshr_addr(returned_mf->m_sector_address);
+    bool returned_from_mshr = false;
+    while (cache->m_mshrs->probe(mshr_address)) {
+        mem_fetch *waiting_mf = cache->m_mshrs->next_access(mshr_address);
+        returned_from_mshr = true;
+        cache->cache_fill(waiting_mf, cycles);
+        if (waiting_mf->needs_reply()) {
+            cache->m_gpu->m_icnt->Push(cache->m_device_id, waiting_mf->m_sm_id,
+                                       waiting_mf, waiting_mf->m_packet_size);
+        } else {
+            delete waiting_mf;
+        }
+    }
+    if (!returned_from_mshr) {
+        cache->cache_fill(returned_mf, cycles);
+        if (returned_mf->needs_reply()) {
+            cache->m_gpu->m_icnt->Push(cache->m_device_id, returned_mf->m_sm_id,
+                                       returned_mf, returned_mf->m_packet_size);
+        } else {
+            delete returned_mf;
+        }
+    }
+}
+
+void l2_data_cache::l2_cache_cycle(int cycles) {
+	    if(!m_dram_L2_queue->empty()){
+	        mem_fetch *mf = m_dram_L2_queue->top();
+	        return_l2_miss_to_sms(this, mf, cycles);
+	        m_dram_L2_queue->pop();
+	    }
 
     // L2 cache return
     mem_fetch *mf_temp = NULL;
@@ -371,14 +419,11 @@ void l2_data_cache::l2_cache_cycle(int cycles) {
             mf_temp = l2_to_sms[i].front();
             while (mf_temp->m_l2_ready_time <= m_gpu->get_gpu_sim_cycles()) {
                 l2_to_sms[i].pop();
-                m_gpu->m_icnt->Push(m_device_id,mf_temp->m_sm_id,mf_temp,mf_temp->m_packet_size);
-
-                if(mf_temp->m_status != L2_HIT){
-                    new_addr_type mshr_address = mf_temp->m_sector_address;
-                    while (m_mshrs->probe(mshr_address)){
-                        mem_fetch *mf_fill = m_mshrs->next_access(mshr_address);
-                        cache_fill(mf_fill, cycles); // L2 fill
-                    }
+                if (mf_temp->m_status == L2_HIT) {
+                    m_gpu->m_icnt->Push(m_device_id, mf_temp->m_sm_id,
+                                        mf_temp, mf_temp->m_packet_size);
+                } else {
+                    return_l2_miss_to_sms(this, mf_temp, cycles);
                 }
                 if (!l2_to_sms[i].empty()) mf_temp = l2_to_sms[i].front();
                 else break;
@@ -419,14 +464,16 @@ unsigned l2_data_cache::cache_access(new_addr_type addr, mem_fetch *mf, unsigned
 
         if (probe_status == RESERVATION_FAIL) {
             return RESERVATION_FAIL;
-        } else if (probe_status == HIT) {
-            m_store_sector_hit++;
-            m_tag_array->tag_array_access(block_addr, time, mf, cache_index);
-            sector_cache_block *block = m_tag_array->get_block(cache_index);
-            block->set_status(MODIFIED, mf->m_sector_mask);
-            if(mf->m_write_type == WRITE_THROUGH_L2){
-                delete mf;
-            }else{
+	        } else if (probe_status == HIT) {
+	            m_store_sector_hit++;
+	            m_tag_array->tag_array_access(block_addr, time, mf, cache_index);
+	            sector_cache_block *block = m_tag_array->get_block(cache_index);
+	            block->set_status(MODIFIED, mf->m_sector_mask);
+	            if(mf->m_write_type == WRITE_THROUGH_L2){
+	                delete mf;
+	            }else if(!mf->needs_reply()){
+	                delete mf;
+	            }else{
                 if(mf->m_tlb_hit){
                     send_l2_to_sm(mf, m_gpu->get_gpu_sim_cycles(),
                         std::stoi(m_gpu_config.m_gpu_config["l2_hit_latency"]));
@@ -451,9 +498,11 @@ unsigned l2_data_cache::cache_access(new_addr_type addr, mem_fetch *mf, unsigned
                 }
                 block->set_status(MODIFIED, mf->m_sector_mask);
                 block->set_last_access_time(time, mf->m_sector_mask);
-                if(mf->m_write_type == WRITE_THROUGH_L2){
-                    delete mf;
-                }else{
+	                if(mf->m_write_type == WRITE_THROUGH_L2){
+	                    delete mf;
+	                }else if(!mf->needs_reply()){
+	                    send_l2_to_dram(mf, std::stoi(m_gpu_config.m_gpu_config["l2_miss_latency"]));
+	                }else{
                     send_l2_to_dram(mf, std::stoi(m_gpu_config.m_gpu_config["l2_miss_latency"]));
                     mf->m_status = L2_HIT;
                 }
@@ -466,9 +515,11 @@ unsigned l2_data_cache::cache_access(new_addr_type addr, mem_fetch *mf, unsigned
                 }else{
                     m_store_sector_miss++;
                 }
-                if(mf->m_write_type == WRITE_THROUGH_L2){
-                    delete mf;
-                }else{
+	                if(mf->m_write_type == WRITE_THROUGH_L2){
+	                    delete mf;
+	                }else if(!mf->needs_reply()){
+	                    send_l2_to_dram(mf, std::stoi(m_gpu_config.m_gpu_config["l2_miss_latency"]));
+	                }else{
                     send_l2_to_dram(mf, std::stoi(m_gpu_config.m_gpu_config["l2_miss_latency"]));
                     mf->m_status = L2_MISS;
                 }
@@ -497,7 +548,6 @@ unsigned l2_data_cache::cache_access(new_addr_type addr, mem_fetch *mf, unsigned
                 m_load_sector_hit++;
                 m_tag_array->tag_array_access(block_addr, time, mf, cache_index);
                 m_mshrs->add(mshr_addr, mf);
-                send_l2_to_dram(mf, std::stoi(m_gpu_config.m_gpu_config["l2_miss_latency"]));
             } else {
                 m_load_sector_miss++;
                 m_tag_array->tag_array_access(block_addr, time, mf, cache_index);
@@ -551,21 +601,22 @@ void memory_partition::dram_model_cycle(int subpid) {
 
   }
 
-    int spid;
+    int spid = 0;
     for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel; p++) {
         spid = (p + last_issued_partition[subpid] + 1) %
                 m_config->m_n_sub_partition_per_memory_channel; // subpartition id 0 or 1
+        const int l2_id = spid + subpid * m_config->m_n_sub_partition_per_memory_channel;
 
-        if (!m_l2_caches[spid + subpid * m_config->m_n_sub_partition_per_memory_channel]->L2_dram_queue_empty() &&
-            can_issue_to_dram(spid + subpid * 2)) {
-          mem_fetch *mf = m_l2_caches[spid + subpid * 2]->L2_dram_queue_top();
+        if (!m_l2_caches[l2_id]->L2_dram_queue_empty() &&
+            can_issue_to_dram(l2_id)) {
+          mem_fetch *mf = m_l2_caches[l2_id]->L2_dram_queue_top();
           if (m_dram[subpid]->full()) break;
 
-          m_l2_caches[spid + subpid * m_config->m_n_sub_partition_per_memory_channel]->L2_dram_queue_pop();
+          m_l2_caches[l2_id]->L2_dram_queue_pop();
           dram_delay_t d{};
           d.req = mf;
           d.ready_cycle = m_gpu->get_gpu_sim_cycles() + std::stoi(m_gpu_config.m_gpu_config["l2_miss_latency"]);
-          d.l2_id = spid + subpid * m_config->m_n_sub_partition_per_memory_channel;
+          d.l2_id = l2_id;
           m_dram_latency_queue[subpid].push_back(d);
           break;  
         }
@@ -627,22 +678,23 @@ void memory_partition::dram_cycle(int subpid) {
 
     m_dram[subpid]->cycle();
 
-    int spid;
+    int spid = 0;
     for (unsigned p = 0; p < m_config->m_n_sub_partition_per_memory_channel; p++) {
         spid = (p + last_issued_partition[subpid] + 1) %
                m_config->m_n_sub_partition_per_memory_channel; 
+        const int l2_id = spid + subpid * m_config->m_n_sub_partition_per_memory_channel;
 
-        if (!m_l2_caches[spid + subpid * 2]->L2_dram_queue_empty() &&
-            can_issue_to_dram(spid + subpid * 2)) {
-            mem_fetch *mf = m_l2_caches[spid + subpid * 2]->L2_dram_queue_top();
+        if (!m_l2_caches[l2_id]->L2_dram_queue_empty() &&
+            can_issue_to_dram(l2_id)) {
+            mem_fetch *mf = m_l2_caches[l2_id]->L2_dram_queue_top();
             if (m_dram[subpid]->full()) break;
 
-            m_l2_caches[spid + subpid * 2]->L2_dram_queue_pop();
+            m_l2_caches[l2_id]->L2_dram_queue_pop();
             dram_delay_t d{};
-            mf->l2_id = spid + subpid * 2;
+            mf->l2_id = l2_id;
             d.req = mf;
             d.ready_cycle = m_gpu->get_gpu_sim_cycles() + std::stoi(m_gpu_config.m_gpu_config["l2_miss_latency"]);
-            d.l2_id = spid + subpid * 2;
+            d.l2_id = l2_id;
             m_dram_latency_queue[subpid].push_back(d);
             break; 
         }

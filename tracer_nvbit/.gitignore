@@ -1,0 +1,4 @@
+nvbit_release/
+*.o
+*.so
+tracer_tool/traces-processing/post-traces-processing

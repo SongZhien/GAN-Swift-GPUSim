@@ -4,10 +4,69 @@
 #include <cstdio>
 #include <utility>
 #include <iomanip>
+#include <set>
 
 #include "gpu.h"
 
 int print_latency = 0;
+
+namespace {
+bool is_store_opcode(const std::string &opcode) {
+    return opcode.find("STG") != std::string::npos ||
+           opcode.find("ST.") != std::string::npos ||
+           opcode.find("STS") != std::string::npos ||
+           opcode == "ST";
+}
+
+long long get_progress_heartbeat_cycles() {
+    static long long interval = []() {
+        const char *env = std::getenv("SWIFTSIM_HEARTBEAT_CYCLES");
+        if (env == nullptr || env[0] == '\0') {
+            return 0LL;
+        }
+        char *end = nullptr;
+        long long parsed = std::strtoll(env, &end, 10);
+        if (end == env || parsed <= 0) {
+            return 0LL;
+        }
+        return parsed;
+    }();
+    return interval;
+}
+}
+
+const std::tuple<int, std::string>&
+streaming_multiprocessor::get_isa_latency_entry(const std::string &opcode) const {
+    auto it = m_gpu_config.gpu_isa_latency.find(opcode);
+    if (it == m_gpu_config.gpu_isa_latency.end() || std::get<1>(it->second).empty()) {
+        fprintf(stderr, "ERROR: missing ISA latency/unit config for opcode '%s'\n", opcode.c_str());
+        exit(1);
+    }
+    return it->second;
+}
+
+sm_unit* streaming_multiprocessor::get_subcore_unit(int sub_num, const std::string &unit_name) const {
+    if (sub_num < 0 || sub_num >= static_cast<int>(m_subcores.size())) {
+        fprintf(stderr, "ERROR: invalid subcore index %d for unit '%s'\n", sub_num, unit_name.c_str());
+        exit(1);
+    }
+    auto unit_it = m_subcores[sub_num].find(unit_name);
+    if (unit_it == m_subcores[sub_num].end() || unit_it->second == nullptr) {
+        fprintf(stderr, "ERROR: missing subcore unit '%s' in subcore %d\n", unit_name.c_str(), sub_num);
+        exit(1);
+    }
+    return unit_it->second;
+}
+
+int streaming_multiprocessor::get_issue_interval_cycles(const std::string &unit_name, const sm_unit *unit) const {
+    if (unit == nullptr || unit->unit_width <= 0) {
+        return 1;
+    }
+    if (unit_name == "TENSOR_units" || unit_name == "UDP_units" || unit_name == "BRA_units") {
+        return 1;
+    }
+    return std::max(1, 32 / unit->unit_width);
+}
 
 
 double delta(int hard, int mine) {
@@ -20,6 +79,7 @@ void gpu::gpu_cycle(void *thread_arg) {
     int kernel_id = ((struct thread_data *) thread_arg)->kernel_id;
     std::string benchmark = ((struct thread_data *) thread_arg)->benchmark;
     bool sm_active = true;
+    const long long heartbeat_interval = get_progress_heartbeat_cycles();
     while (sm_active) {
         int total_l1_to_l2_num = 0;
         int total_l1_to_l2_mshr = 0;
@@ -40,6 +100,29 @@ void gpu::gpu_cycle(void *thread_arg) {
             if (sm->sm_active()) {
                 sm_active = true;// there is active sm
             }
+        }
+
+        if (heartbeat_interval > 0 && (gpu_sim_cycles % heartbeat_interval) == 0) {
+            std::size_t active_blocks = 0;
+            std::size_t active_warps = 0;
+            long long pending_mem_requests = 0;
+            long long pending_ldst_insts = 0;
+            for (auto &sm: m_sm) {
+                active_blocks += sm->block_vec.size();
+                for (auto &block_entry: sm->block_vec) {
+                    block *active_block = block_entry.second;
+                    active_warps += active_block->warp_vec.size();
+                    for (auto &warp_entry: active_block->warp_vec) {
+                        warp *active_warp = warp_entry.second;
+                        pending_mem_requests += active_warp->m_pending_mem_request_num;
+                        pending_ldst_insts += active_warp->pending_inst;
+                    }
+                }
+            }
+            printf("[HEARTBEAT] kernel=%d gpu_sim_cycle=%d active_blocks=%zu active_warps=%zu pending_mem_requests=%lld pending_ldst_insts=%lld\n",
+                   kernel_id, gpu_sim_cycles, active_blocks, active_warps, pending_mem_requests,
+                   pending_ldst_insts);
+            fflush(stdout);
         }
     }
     int stg_cycles = 0;
@@ -63,6 +146,7 @@ void gpu::gpu_cycle(void *thread_arg) {
     gpu_sim_cycles += stg_cycles;
     // printf("gpu_sim_cycle:%d\n", gpu_sim_cycles);
 
+    int active_sm_cycles = 0;
     int total_sm_cycles = 0, l1_rd_sector = 0, l1_rd_hit = 0, l1_wr_sector = 0, l1_wr_hit = 0;
     int l1_rd_miss = 0;
     int l1_wr_miss = 0;
@@ -72,8 +156,19 @@ void gpu::gpu_cycle(void *thread_arg) {
     long long total_thread_ldst_inst = 0;
     long long total_ldst_inst = 0; 
     long long total_inst = 0;
+    int issue_active_sm_cycles = 0;
+    int memory_stall_sm_cycles = 0;
+    int dependency_stall_sm_cycles = 0;
+    int unit_stall_sm_cycles = 0;
+    int scheduler_idle_sm_cycles = 0;
     for (auto &sm: m_sm) {
         if (sm->cycles > 0) {
+            active_sm_cycles += sm->cycles;
+            issue_active_sm_cycles += sm->m_issue_active_cycles;
+            memory_stall_sm_cycles += sm->m_memory_stall_cycles;
+            dependency_stall_sm_cycles += sm->m_dependency_stall_cycles;
+            unit_stall_sm_cycles += sm->m_unit_stall_cycles;
+            scheduler_idle_sm_cycles += sm->m_scheduler_idle_cycles;
             total_sm_cycles += sm->cycles + stg_cycles;
             total_sm_cycles += stoi(m_gpu_configs.m_gpu_config["kernel_launch_cycles"]);
             total_inst += sm->m_execute_inst;
@@ -88,12 +183,26 @@ void gpu::gpu_cycle(void *thread_arg) {
         l1_rd_miss += sm->m_l1_data_cache->m_load_sector_miss;
         l1_wr_miss += sm->m_l1_data_cache->m_store_sector_miss;
     }
-    total_sm_cycles +=
+   total_sm_cycles +=
             stoi(m_gpu_configs.m_gpu_config["block_launch_cycles"]) * m_active_kernel->m_kernel_info.m_grid_size;
+   this->gpu_sim_insn = total_inst;
+   this->active_sm_cycles = active_sm_cycles;
+   this->total_sm_cycles = total_sm_cycles;
+   this->issue_active_sm_cycles = issue_active_sm_cycles;
+   this->memory_stall_sm_cycles = memory_stall_sm_cycles;
+   this->dependency_stall_sm_cycles = dependency_stall_sm_cycles;
+   this->unit_stall_sm_cycles = unit_stall_sm_cycles;
+   this->scheduler_idle_sm_cycles = scheduler_idle_sm_cycles;
 
    printf("\n========= kernel %d =========\n", m_active_kernel->m_kernel_id);
-
-    
+   printf("gpu_sim_cycle:%d\n", gpu_sim_cycles);
+   printf("gpu_sim_insn:%lld\n", total_inst);
+   printf("active_sm_cycles:%d\n", active_sm_cycles);
+   printf("issue_active_sm_cycles:%d\n", issue_active_sm_cycles);
+   printf("memory_stall_sm_cycles:%d\n", memory_stall_sm_cycles);
+   printf("dependency_stall_sm_cycles:%d\n", dependency_stall_sm_cycles);
+   printf("unit_stall_sm_cycles:%d\n", unit_stall_sm_cycles);
+   printf("scheduler_idle_sm_cycles:%d\n", scheduler_idle_sm_cycles);
    printf("total_sm_cycles:%d\n", total_sm_cycles);
    printf("total_thread_inst:%lld\n", total_inst);
    printf("total_thread_ldst_inst:%lld\n", total_thread_ldst_inst);
@@ -161,14 +270,27 @@ void streaming_multiprocessor::sm_cycle() {
     #endif
   
     while (block_vec.size() < m_max_blocks && m_active_kernel->block_pointer < m_active_kernel->m_blocks.size()) {
-        m_active_kernel->m_blocks[m_active_kernel->block_pointer]->load_mem_request("/mnt/sda/xu/gpu_workload_traces/" + m_gpu->active_benchmark + "/traces/",
-        std::stoi(m_gpu->m_gpu_configs.l1_cache_config["l1_cache_line_size"]),m_active_kernel->m_blocks[m_active_kernel->block_pointer]->m_block_id);
+        m_active_kernel->m_blocks[m_active_kernel->block_pointer]->load_mem_request(
+            *m_gpu->traceReader,
+            std::stoi(m_gpu->m_gpu_configs.l1_cache_config["l1_cache_line_size"]),
+            m_active_kernel->m_blocks[m_active_kernel->block_pointer]->m_block_id);
         block_vec[m_active_kernel->m_blocks[m_active_kernel->block_pointer]->m_block_id] = m_active_kernel->m_blocks[m_active_kernel->block_pointer];
         m_active_kernel->block_pointer++;
     }
 
     int t = schedule_warps_in_subcores();
 
+    if (t > 0) {
+        m_issue_active_cycles += 1;
+    } else if (has_pending_memory_warp()) {
+        m_memory_stall_cycles += 1;
+    } else if (has_dependency_stall_warp()) {
+        m_dependency_stall_cycles += 1;
+    } else if (has_unit_stall_warp()) {
+        m_unit_stall_cycles += 1;
+    } else if (has_ready_warp()) {
+        m_scheduler_idle_cycles += 1;
+    }
     m_execute_inst += t;
   
 }
@@ -194,10 +316,12 @@ int streaming_multiprocessor::schedule_warps_in_subcores() {
                 if (active.count() <= 0) {
                     break;
                 }
-                auto &warp = it->second;
+                warp *warp = it->second;
                 if (warp->warp_point >= warp->m_insts.size() && warp->m_pending_mem_request_num == 0 && warp->pending_inst ==0) {
                     warp->active = false;
-                    it = get_block(warp->m_block_id)->warp_vec.erase(it);
+                    auto *owner_block = get_block(warp->m_block_id);
+                    it = owner_block->warp_vec.erase(it);
+                    owner_block->retired_warps.push_back(warp);
                     continue;
                 }
                 else it++;
@@ -245,17 +369,19 @@ int streaming_multiprocessor::issue_inst(warp &warp, int sub_num) {
     for (int i = 0; i < std::stoi(m_gpu_config.m_gpu_config["num_inst_dispatch_units_per_warp"]); ++i) {
         inst = warp.m_insts[warp.warp_point];
         m_total_inst++;
-        auto &unit = m_subcores[sub_num][std::get<1>(m_gpu_config.gpu_isa_latency[inst.m_opcode])];
+        const auto &isa_entry = get_isa_latency_entry(inst.m_opcode);
+        sm_unit *unit = get_subcore_unit(sub_num, std::get<1>(isa_entry));
         if (unit->ready_time <= cycles) {
-            if (std::get<1>(m_gpu_config.gpu_isa_latency[inst.m_opcode])=="LDS_units") {
+            if (std::get<1>(isa_entry) == "LDS_units") {
                 m_ldst_inst++;
                 m_execute_ldst_inst+=inst.m_active_thread_num;
                 LdStInst lsi;
                 lsi.process(m_gpu_config, unit, warp, cycles, inst.m_pc, inst.m_pc_index, inst.m_active_thread_num,
-                            inst.m_opcode, m_sm_id, m_queue_sm_to_l1, m_l1_cache_config, m_active_kernel, m_gpu);
+                            inst.m_opcode, inst.m_full_opcode, m_sm_id, m_queue_sm_to_l1, m_l1_cache_config,
+                            m_active_kernel, m_gpu);
             } else {
-                int latency = std::get<0>(m_gpu_config.gpu_isa_latency[inst.m_opcode]);
-                unit->ready_time += 32 / unit->unit_width;
+                int latency = std::get<0>(isa_entry);
+                unit->ready_time += get_issue_interval_cycles(std::get<1>(isa_entry), unit);
                 warp.completions.push_back(cycles + latency);
             }
             warp.warp_point += 1;
@@ -315,7 +441,8 @@ void streaming_multiprocessor::write_back_request_l2(mem_fetch *mf) {
                 printf("error!\n");
                 exit(1);
             }
-            m_l1_data_cache->cache_fill(mf, cycles);
+            m_l1_data_cache->cache_fill(mf_next, cycles);
+            retired_mem_fetches.push_back(mf_next);
         }
     } else { 
     #endif
@@ -335,6 +462,7 @@ void streaming_multiprocessor::write_back_request_l2(mem_fetch *mf) {
             printf("sm id: %d block id:%d warp id:%d\n", m_sm_id, m_warp->m_block_id, m_warp->m_warp_id);
             exit(1);
         }
+        delete mf;
     }
     #if ANALYSIS == 0
 
@@ -345,13 +473,13 @@ void streaming_multiprocessor::write_back_request_l2(mem_fetch *mf) {
 bool streaming_multiprocessor::check_unit_in_subcore(warp &warp, int sub_num) {
     inst inst;
     inst = warp.m_insts[warp.warp_point];
-    return check_unit(sub_num, std::get<1>(m_gpu_config.gpu_isa_latency[inst.m_opcode]));
+    return check_unit(sub_num, std::get<1>(get_isa_latency_entry(inst.m_opcode)));
 }
 
 
 bool streaming_multiprocessor::check_unit(int sub_num, const string &unit_name) {
 //    printf(":: %s\n", unit_name.c_str());
-    auto &unit = m_subcores[sub_num][unit_name];
+    sm_unit *unit = get_subcore_unit(sub_num, unit_name);
     if (unit->ready_time <= cycles) {
         return true;
     }
@@ -368,6 +496,100 @@ bool streaming_multiprocessor::check_dependency(warp &warp) {
             return false;
     }
     return true;
+}
+
+bool streaming_multiprocessor::has_ready_warp() const {
+    for (const auto &block_entry: block_vec) {
+        block *block_ptr = block_entry.second;
+        if (!block_ptr->is_active(cycles)) {
+            continue;
+        }
+        for (const auto &warp_entry: block_ptr->warp_vec) {
+            warp *warp_ptr = warp_entry.second;
+            if (warp_ptr->warp_point < static_cast<int>(warp_ptr->m_insts.size())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool streaming_multiprocessor::has_pending_memory_warp() const {
+    for (const auto &block_entry: block_vec) {
+        block *block_ptr = block_entry.second;
+        if (!block_ptr->is_active(cycles)) {
+            continue;
+        }
+        for (const auto &warp_entry: block_ptr->warp_vec) {
+            warp *warp_ptr = warp_entry.second;
+            if (warp_ptr->m_pending_mem_request_num > 0 || warp_ptr->pending_inst > 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool streaming_multiprocessor::has_dependency_stall_warp() const {
+    for (const auto &block_entry: block_vec) {
+        block *block_ptr = block_entry.second;
+        if (!block_ptr->is_active(cycles)) {
+            continue;
+        }
+        for (const auto &warp_entry: block_ptr->warp_vec) {
+            warp *warp_ptr = warp_entry.second;
+            if (warp_ptr->warp_point >= static_cast<int>(warp_ptr->m_insts.size())) {
+                continue;
+            }
+            const inst &next_inst = warp_ptr->m_insts[warp_ptr->warp_point];
+            for (int dependency_index: next_inst.m_dependency) {
+                if (dependency_index >= 0 &&
+                    dependency_index < static_cast<int>(warp_ptr->completions.size()) &&
+                    cycles < warp_ptr->completions[dependency_index]) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool streaming_multiprocessor::has_unit_stall_warp() const {
+    for (const auto &block_entry: block_vec) {
+        block *block_ptr = block_entry.second;
+        if (!block_ptr->is_active(cycles)) {
+            continue;
+        }
+        for (const auto &warp_entry: block_ptr->warp_vec) {
+            warp *warp_ptr = warp_entry.second;
+            if (warp_ptr->warp_point >= static_cast<int>(warp_ptr->m_insts.size())) {
+                continue;
+            }
+            const inst &next_inst = warp_ptr->m_insts[warp_ptr->warp_point];
+            bool dependency_ready = true;
+            for (int dependency_index: next_inst.m_dependency) {
+                if (dependency_index >= 0 &&
+                    dependency_index < static_cast<int>(warp_ptr->completions.size()) &&
+                    cycles < warp_ptr->completions[dependency_index]) {
+                    dependency_ready = false;
+                    break;
+                }
+            }
+            if (!dependency_ready) {
+                continue;
+            }
+            const auto &isa_entry = get_isa_latency_entry(next_inst.m_opcode);
+            const std::string &unit_name = std::get<1>(isa_entry);
+            for (int sub_num = 0; sub_num < subcores; sub_num++) {
+                sm_unit *unit = get_subcore_unit(sub_num, unit_name);
+                if (unit->ready_time <= cycles) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 
@@ -389,10 +611,10 @@ void streaming_multiprocessor::load_all_subcore_units() {
     for (int i = 0; i < subcores; i++) {
         std::map<std::string, sm_unit *> subcore;
         for (auto &unit: m_gpu_config.m_sm_pipeline_units) {
-            sm_unit *unit_t = new sm_unit(unit.first);
             if (unit.second < subcores) {
 //                printf("::%s\n", unit.first.c_str());
                 if (unit_out == NULL) {
+                    sm_unit *unit_t = new sm_unit(unit.first);
                     unit_t->set_sm(this);
                     unit_t->unit_width = unit.second;
                     unit_out = unit_t;
@@ -400,6 +622,7 @@ void streaming_multiprocessor::load_all_subcore_units() {
                 subcore[unit.first] = unit_out;
                 continue;
             }
+            sm_unit *unit_t = new sm_unit(unit.first);
             unit_t->set_sm(this);
             unit_t->unit_width = unit.second / subcores;
             subcore[unit.first] = unit_t;
@@ -409,10 +632,47 @@ void streaming_multiprocessor::load_all_subcore_units() {
     }
 }
 
-gpu::gpu(std::string benchmark) : gpu_sim_cycles(0), mf_id(0) {
+streaming_multiprocessor::~streaming_multiprocessor() {
+    delete m_l1_data_cache;
+    for (auto *mf : retired_mem_fetches) {
+        delete mf;
+    }
+    std::unordered_set<sm_unit *> unique_units;
+    for (auto &subcore : m_subcores) {
+        for (auto &unit_entry : subcore) {
+            unique_units.insert(unit_entry.second);
+        }
+    }
+    for (auto *unit : unique_units) {
+        delete unit;
+    }
+}
+
+gpu::gpu(std::string benchmark) :
+        gpu_sim_cycles(0),
+        gpu_sim_insn(0),
+        active_sm_cycles(0),
+        total_sm_cycles(0),
+        issue_active_sm_cycles(0),
+        memory_stall_sm_cycles(0),
+        dependency_stall_sm_cycles(0),
+        unit_stall_sm_cycles(0),
+        scheduler_idle_sm_cycles(0),
+        mf_id(0) {
     active_benchmark = std::move(benchmark);
     init_config();
     build_gpu();
+}
+
+gpu::~gpu() {
+    for (auto *sm : m_sm) {
+        delete sm;
+    }
+    delete traceReader;
+    delete m_active_kernel;
+    delete m_memory_partition;
+    delete m_memory_config;
+    delete m_icnt;
 }
 
 void gpu::init_config() {
@@ -472,7 +732,7 @@ void gpu::read_trace(int kernel_id, kernel_info &kernelInfo,
     traceReader = new trace_reader(trace_reader(kernel_id));
     kernelInfo = kernel_info();
 
-    traceReader->read_sass("/mnt/sda/xu/gpu_workload_traces/" + active_benchmark + "/traces/", kernelInfo,
+    traceReader->read_sass(get_trace_root() + active_benchmark + "/traces/", kernelInfo,
                            trace_insts);
 }
 
@@ -568,6 +828,17 @@ int floor(float x, float s) {
 
 void gpu::first_spawn_block() {
     int max_blocks = max_block_per_sm(m_active_kernel->m_kernel_info);
+    if (max_blocks <= 0) {
+        fprintf(stderr,
+                "ERROR: kernel %d has zero residency on current GPU config "
+                "(block_size=%u, shared_mem_bytes=%u, num_registers=%u). "
+                "Check occupancy-related config such as shared_mem_size and max_active_threads_per_SM.\n",
+                m_active_kernel->m_kernel_id,
+                m_active_kernel->m_kernel_info.m_block_size,
+                m_active_kernel->m_kernel_info.m_shared_mem_bytes,
+                m_active_kernel->m_kernel_info.m_num_registers);
+        exit(1);
+    }
 
     int active_sms = std::min((int) m_active_kernel->m_kernel_info.m_grid_size,
                               std::stoi(m_gpu_configs.m_gpu_config["sm_num"]));
@@ -578,7 +849,7 @@ void gpu::first_spawn_block() {
     for (auto &block: m_active_kernel->m_blocks) {
         if (m_sm[index]->block_vec.size() < max_blocks) {
 
-            block.second->load_mem_request("/mnt/sda/xu/gpu_workload_traces/" + active_benchmark + "/traces/",
+            block.second->load_mem_request(*traceReader,
                                            std::stoi(m_gpu_configs.l1_cache_config["l1_cache_line_size"]),
                                            block.second->m_block_id);
             m_sm[index]->block_vec[block.first] = block.second;
@@ -604,8 +875,8 @@ void sm_unit::unit_cycle(int cycles, gpu *p_gpu) {
     if (m_sm->m_queue_sm_to_l1_busy[m_bank_id]) 
         return;
     unsigned int sm_id = m_sm->m_sm_id;
-    int m_access_type = (m_inst->m_opcode.find("LDG") != string::npos || m_inst->m_opcode.find("LD") != string::npos)
-                        ? 0 : 1;
+    const bool is_store = is_store_opcode(m_inst->m_opcode);
+    int m_access_type = is_store ? 1 : 0;
 
     unsigned long long m_address = address.first;
     unsigned m_sector_mask = address.second;
@@ -618,14 +889,17 @@ void sm_unit::unit_cycle(int cycles, gpu *p_gpu) {
     auto *mf = new mem_fetch(sm_id, m_access_type, m_address, m_sector_mask, m_space,
                              m_is_atomic, m_gen_time, m_src_block_id, m_src_warp_id,
                              m_completion_index, p_gpu);
+    mf->m_no_reply = is_store;
     mf->pc = m_inst->m_pc;
     mf->pc_index = m_inst->m_pc_index;
     mem_fetch_point++;
     int bank_id = (int) l1_bank_hash(mf);
     m_sm->m_queue_sm_to_l1[bank_id].push(mf);
     m_sm->m_queue_sm_to_l1_busy.set(bank_id);
-    m_warp->increase_pending_request(m_completion_index);
-    m_warp->m_pending_mem_request_num++;
+    if (mf->needs_reply()) {
+        m_warp->increase_pending_request(m_completion_index);
+        m_warp->m_pending_mem_request_num++;
+    }
     m_sm->m_active_kernel->request_nums++;
     if (mem_fetch_point == m_inst->m_coalesced_address.size()) {
         mem_fetch_point = -1;
@@ -641,21 +915,27 @@ void sm_unit::unit_cycle(int cycles, gpu *p_gpu) {
 
 void
 LdStInst::process(gpu_config &gpu_config_t, sm_unit *unit, warp &warp, int cycles, long long int pc_t, int pc_index_t,
-                  int active_thread_num_t, const string &opcode, unsigned int sm_id_t,
+                  int active_thread_num_t, const string &opcode, const string &full_opcode, unsigned int sm_id_t,
                   std::map<int, std::queue<mem_fetch *>> &queue_sm_to_l1_t, cache_config &l1_cache_config_t,
                   kernel *active_kernel_t, gpu *p_gpu) {
-    if (opcode.find("LDG") != string::npos || opcode.find("STG") != string::npos ||
-        opcode.find("LD.") != string::npos || opcode.find("ST.") != string::npos) {
+    const string &op_for_semantics = full_opcode.empty() ? opcode : full_opcode;
+    if (op_for_semantics.find("LDG") != string::npos || op_for_semantics.find("STG") != string::npos ||
+        op_for_semantics.find("LD.") != string::npos || op_for_semantics.find("ST.") != string::npos) {
         process_LDG_STG(gpu_config_t, unit, warp, cycles, pc_t, pc_index_t, active_thread_num_t,
-                        opcode, sm_id_t, queue_sm_to_l1_t, l1_cache_config_t, active_kernel_t);
-    } else if (opcode.find("LDS") != string::npos || opcode.find("STS") != string::npos ||
-               opcode.find("ATOMS") != string::npos) {
+                        opcode, op_for_semantics, sm_id_t, queue_sm_to_l1_t, l1_cache_config_t, active_kernel_t);
+    } else if (op_for_semantics.find("LDS") != string::npos || op_for_semantics.find("STS") != string::npos ||
+               op_for_semantics.find("ATOMS") != string::npos) {
         process_LDS_STS_ATOMS(gpu_config_t, active_thread_num_t, unit, warp, cycles);
-    } else if (opcode.find("ATOM") != string::npos || opcode.find("ATOMG") != string::npos) {
+    } else if (op_for_semantics.find("ATOM") != string::npos || op_for_semantics.find("ATOMG") != string::npos) {
         process_ATOM_ATOMG(unit, warp, pc_t, pc_index_t, sm_id_t, cycles, queue_sm_to_l1_t, l1_cache_config_t, p_gpu);
     } else {
-        int latency_t = std::get<0>(gpu_config_t.gpu_isa_latency[opcode]);
-        unit->ready_time += 32 / unit->unit_width;
+        auto it = gpu_config_t.gpu_isa_latency.find(opcode);
+        if (it == gpu_config_t.gpu_isa_latency.end()) {
+            fprintf(stderr, "ERROR: missing ISA latency/unit config for opcode '%s'\n", opcode.c_str());
+            exit(1);
+        }
+        int latency_t = std::get<0>(it->second);
+        unit->ready_time += unit->m_sm->get_issue_interval_cycles(std::get<1>(it->second), unit);
         warp.completions.push_back(cycles + latency_t);
     }
 }
@@ -676,7 +956,7 @@ void LdStInst::process_LDS_STS_ATOMS(gpu_config &gpu_config_t, int active_thread
     } else {
         latency_t = 69;
     }
-    unit->ready_time += 32 / unit->unit_width;
+    unit->ready_time += unit->m_sm->get_issue_interval_cycles(unit->unit_name, unit);
     warp.completions.push_back(cycles + latency_t);
 }
 
@@ -709,17 +989,24 @@ void LdStInst::process_ATOM_ATOMG(sm_unit *unit, warp &warp, long long int pc_t,
 }
 
 void LdStInst::process_LDG_STG(gpu_config &gpu_config_t, sm_unit *unit, warp &warp, int cycles, long long int pc_t,
-                               int pc_index_t, int active_thread_num_t, const string &opcode, unsigned int sm_id_t,
+                               int pc_index_t, int active_thread_num_t, const string &opcode,
+                               const string &full_opcode, unsigned int sm_id_t,
                                std::map<int, std::queue<mem_fetch *>> &queue_sm_to_l1_t,
                                cache_config &l1_cache_config_t, kernel *active_kernel_t) {
     mem_inst *m_mem_inst = warp.get_mem_inst(pc_t, pc_index_t);
     if (m_mem_inst == nullptr || active_thread_num_t == 0 || m_mem_inst->m_coalesced_address.empty()) {
         int latency = 1;
-        unit->ready_time += 32 / unit->unit_width;
+        unit->ready_time += unit->m_sm->get_issue_interval_cycles(unit->unit_name, unit);
         warp.completions.push_back(cycles + latency);
     } else {
         #if ANALYSIS == 0
-        warp.completions.push_back(INT_MAX);
+        m_mem_inst->m_opcode = full_opcode;
+        const bool is_store = is_store_opcode(full_opcode);
+        if (is_store) {
+            warp.completions.push_back(cycles + 1);
+        } else {
+            warp.completions.push_back(INT_MAX);
+        }
         unit->ready_time = INT_MAX;
         m_mem_inst->completions_index = warp.completions.size() - 1;
         unit->set_ldst_inst(m_mem_inst, &warp);
@@ -727,4 +1014,3 @@ void LdStInst::process_LDG_STG(gpu_config &gpu_config_t, sm_unit *unit, warp &wa
         #endif
     }
 }
-

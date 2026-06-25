@@ -49,6 +49,10 @@ public:
         return m_access_type; //write true
     }
 
+    bool needs_reply() const {
+        return !m_no_reply;
+    }
+
     int get_mem_sub_partition_id(int,int);
 
     unsigned m_sm_id;
@@ -57,6 +61,7 @@ public:
     unsigned m_sector_mask;
     unsigned m_space;
     bool m_is_atomic;
+    bool m_no_reply;
     long long m_gen_time;
     int m_status;
     int m_write_type;

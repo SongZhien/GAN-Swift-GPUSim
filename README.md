@@ -1,13 +1,29 @@
 Swift-Sim is a modular and hybrid GPU simulation framework.
 
-This is a newer and improved version of the Swift-Sim simulator.  Based on the framework we proposed in DATE 2025: Swift-Sim: A Modular and Hybrid GPU Architecture Simulation Framework, we have made the following improvements:
+This repository is an updated version based on the original Swift-Sim project:
+https://github.com/xurongxiang/Swift-GPUSim
 
-1、Instead of simulating only the representative warp's instructions, we now simulate all SASS instructions, effectively reducing errors caused by inter-block divergence.
+Compared with the original implementation, this version focuses on improving
+the simulator's functionality, architectural coverage, correctness, and runtime
+efficiency. The major updates include:
 
-2、We modify the memory subsystem modeling, simulating the execution of all memory instructions rather than just a subset, improving the accuracy of memory performance analysis.
+1. Added support for Tensor Core simulation, enabling more accurate modeling of
+   workloads that rely on tensor operations.
 
-3、Several bugs in the original version have been fixed, further enhancing the correctness and robustness of the simulator. 
+2. Fixed multiple instruction-merging issues that could affect the correctness
+   of instruction execution and performance estimation.
 
-As a result, the simulation speed of Swift-Sim-Accurate is reduced compared to the original version, but the accuracy has been significantly improved.
+3. Added support for several previously unsupported instructions, improving the
+   simulator's coverage of real GPU workloads.
 
-https://github.com/xurongxiang/Swift-GPUSim/blob/main/README.md
+4. Implemented support for newer GPU architectures, allowing Swift-Sim to model
+   more recent hardware platforms.
+
+5. Fixed inaccurate multi-level cache simulation behavior in some scenarios,
+   improving the reliability of memory hierarchy modeling.
+
+6. Fixed memory leak issues, improving simulator stability during long-running
+   experiments.
+
+With these updates, both simulation speed and accuracy have been improved over
+the previous version.

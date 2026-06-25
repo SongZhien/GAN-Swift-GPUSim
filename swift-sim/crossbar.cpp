@@ -44,7 +44,18 @@ xbar_router::xbar_router(unsigned router_id, enum Interconnect_type m_type,
     conflicts = 0;
 }
 
-xbar_router::~xbar_router() {}
+xbar_router::~xbar_router() {
+    for (auto &queue : in_buffers) {
+        while (!queue.empty()) {
+            queue.pop();
+        }
+    }
+    for (auto &queue : out_buffers) {
+        while (!queue.empty()) {
+            queue.pop();
+        }
+    }
+}
 
 void xbar_router::Push(unsigned input_deviceID, unsigned output_deviceID,
                        void* data, unsigned int size) {
@@ -220,6 +231,4 @@ void LocalInterconnect::DisplayStats(){
 
 
 }
-
-
 

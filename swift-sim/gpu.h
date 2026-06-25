@@ -5,13 +5,26 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdlib>
 #include "config_reader.h"
 #include "trace_reader.h"
 #include "cache.h"
 #include "mem_fetch.h"
 #include "crossbar.h"
 
+#define DEFAULT_TRACE_PATH "/home/lxz/traces_disk/swift_traces/"
 
+inline std::string get_trace_root() {
+    const char *env = std::getenv("SWIFTSIM_TRACE_PATH");
+    if (env != nullptr && env[0] != '\0') {
+        std::string path(env);
+        if (path.back() != '/') {
+            path.push_back('/');
+        }
+        return path;
+    }
+    return DEFAULT_TRACE_PATH;
+}
 
 extern int request_id;
 class streaming_multiprocessor;
@@ -27,12 +40,7 @@ class gpu {
 public:
     explicit gpu(std::string benchmark);
 
-    ~gpu() {
-        delete traceReader;
-        delete m_active_kernel;
-        delete m_memory_partition;
-        delete m_memory_config;
-    }
+    ~gpu();
 
     void init_config();
 
@@ -72,6 +80,14 @@ public:
     unsigned get_mf_id() const{return mf_id;}
     void increase_mf_id(){mf_id++;}
     int get_gpu_sim_cycles() const{return gpu_sim_cycles;}
+    long long get_gpu_sim_insn() const{return gpu_sim_insn;}
+    int get_active_sm_cycles() const{return active_sm_cycles;}
+    int get_total_sm_cycles() const{return total_sm_cycles;}
+    int get_issue_active_sm_cycles() const{return issue_active_sm_cycles;}
+    int get_memory_stall_sm_cycles() const{return memory_stall_sm_cycles;}
+    int get_dependency_stall_sm_cycles() const{return dependency_stall_sm_cycles;}
+    int get_unit_stall_sm_cycles() const{return unit_stall_sm_cycles;}
+    int get_scheduler_idle_sm_cycles() const{return scheduler_idle_sm_cycles;}
     std::unordered_map<new_addr_type, std::unordered_set<int>> address_to_sms;
     long long total_access = 0;
     long long l2_push_num = 0;
@@ -92,6 +108,14 @@ private:
     int max_block_limit_by_smem(kernel_info kernelInfo);
 
     int gpu_sim_cycles;
+    long long gpu_sim_insn;
+    int active_sm_cycles;
+    int total_sm_cycles;
+    int issue_active_sm_cycles;
+    int memory_stall_sm_cycles;
+    int dependency_stall_sm_cycles;
+    int unit_stall_sm_cycles;
+    int scheduler_idle_sm_cycles;
     
     unsigned mf_id;
 
@@ -107,11 +131,19 @@ public:
         is_active = false;
         m_max_blocks = 0;
         m_execute_inst = 0;
+        m_issue_active_cycles = 0;
+        m_memory_stall_cycles = 0;
+        m_dependency_stall_cycles = 0;
+        m_unit_stall_cycles = 0;
+        m_scheduler_idle_cycles = 0;
+        m_execute_ldst_inst = 0;
         m_ldst_inst = 0;
         m_total_inst = 0;
         m_queue_sm_to_l1_busy.reset();
         load_all_subcore_units();
     }
+
+    ~streaming_multiprocessor();
 
     void init(gpu* gpu){
         m_gpu = gpu;
@@ -124,7 +156,21 @@ public:
 
     bool check_unit(int sub_num, const string &unit_name);
 
+    const std::tuple<int, std::string>& get_isa_latency_entry(const std::string &opcode) const;
+
+    sm_unit* get_subcore_unit(int sub_num, const std::string &unit_name) const;
+
+    int get_issue_interval_cycles(const std::string &unit_name, const sm_unit *unit) const;
+
     bool check_dependency(warp &);
+
+    bool has_ready_warp() const;
+
+    bool has_pending_memory_warp() const;
+
+    bool has_dependency_stall_warp() const;
+
+    bool has_unit_stall_warp() const;
 
 
     int issue_inst(warp &, int sub_num);
@@ -183,11 +229,17 @@ public:
     unsigned m_sm_id;
     int m_max_blocks;
     std::map<int,block *> block_vec;
+    std::vector<mem_fetch *> retired_mem_fetches;
     bool is_active;
     gpu_config m_gpu_config;
     int cycles;
     kernel *m_active_kernel;
     int m_execute_inst;
+    int m_issue_active_cycles;
+    int m_memory_stall_cycles;
+    int m_dependency_stall_cycles;
+    int m_unit_stall_cycles;
+    int m_scheduler_idle_cycles;
     int m_execute_ldst_inst;
     int m_ldst_inst;
     int m_total_inst;
@@ -238,11 +290,11 @@ public:
 class LdStInst{
 public:
     void process(gpu_config& gpu_config_t, sm_unit* unit, warp& warp, int cycles, long long int pc_t,
-                 int pc_index_t, int active_thread_num_t, const string& opcode, unsigned sm_id_t,
+                 int pc_index_t, int active_thread_num_t, const string& opcode, const string& full_opcode, unsigned sm_id_t,
                  std::map<int, std::queue<mem_fetch *>>& queue_sm_to_l1_t, cache_config& l1_cache_config_t,
                  kernel* active_kernel_t, gpu*);
     void process_LDG_STG(gpu_config& gpu_config_t, sm_unit* unit, warp& warp, int cycles, long long int pc_t, int pc_index_t,
-                         int active_thread_num_t, const string& opcode, unsigned sm_id_t, std::map<int, std::queue<mem_fetch *>>& queue_sm_to_l1_t, cache_config& l1_cache_config_t, kernel*active_kernel_t);
+                         int active_thread_num_t, const string& opcode, const string& full_opcode, unsigned sm_id_t, std::map<int, std::queue<mem_fetch *>>& queue_sm_to_l1_t, cache_config& l1_cache_config_t, kernel*active_kernel_t);
     static void process_LDS_STS_ATOMS(gpu_config& gpu_config_t, int active_thread_num_t, sm_unit* unit, warp& warp, int cycles);
     void process_ATOM_ATOMG(sm_unit* unit, warp& warp, long long pc_t, int pc_index_t, unsigned sm_id_t,
                             int cycles, std::map<int, std::queue<mem_fetch *>>& queue_sm_to_l1_t,
@@ -254,4 +306,4 @@ int ceil(float x, float s);
 
 int floor(float x, float s);
 
-#endif 
+#endif

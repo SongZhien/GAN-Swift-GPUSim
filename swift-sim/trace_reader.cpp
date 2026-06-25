@@ -3,14 +3,26 @@
 
 #include <iostream>
 #include <cmath>
+#include <cstdio>
+#include <map>
 #include <vector>
 #include <string>
 
+namespace {
+bool is_memory_trace_line(const std::string &line) {
+    return line.find("LDG") != std::string::npos ||
+           line.find("STG") != std::string::npos ||
+           line.find("LD.") != std::string::npos ||
+           line.find("ST.") != std::string::npos ||
+           line.find("ATOM") != std::string::npos;
+}
+}
 
 void trace_reader::gen_block_mem_trace(const std::string &trace_path, int kernel_id) {
     std::string mem_file = trace_path + "/kernel-" + std::to_string(kernel_id) + ".mem";
     std::ifstream file(mem_file);
     std::string line;
+    std::map<int, FILE *> block_files;
     while (std::getline(file, line)) {
         unsigned pos_LDG = line.find("LDG");
         unsigned pos_STG = line.find("STG");
@@ -22,15 +34,78 @@ void trace_reader::gen_block_mem_trace(const std::string &trace_path, int kernel
             unsigned pos_split = line.find_first_of(' ');
             std::string tmp = line.substr(0, pos_split);
             int block_id = std::stoi(tmp);
-            std::ofstream wf(
+            FILE *wf = nullptr;
+            auto it = block_files.find(block_id);
+            if (it == block_files.end()) {
+                std::string block_mem_file =
                     trace_path + "/kernel-" + std::to_string(kernel_id) + "-block-" + std::to_string(block_id) +
-                    ".mem", std::ios::app);
+                    ".mem";
+                wf = fopen(block_mem_file.c_str(), "a");
+                if (wf == nullptr) {
+                    std::cerr << "ERROR: cannot open block mem trace for writing: " << block_mem_file << std::endl;
+                    exit(1);
+                }
+                block_files[block_id] = wf;
+            } else {
+                wf = it->second;
+            }
             line = line.substr(pos_split + 1, line.size() - 2);
-            wf << line << "\n";
-            wf.close();
+            fprintf(wf, "%s\n", line.c_str());
         }
     }
+    for (auto &entry: block_files) {
+        fclose(entry.second);
+    }
     file.close();
+}
+
+void trace_reader::build_block_mem_index(const std::string &trace_path, int kernel_id) {
+    m_mem_file_path = trace_path + "/kernel-" + std::to_string(kernel_id) + ".mem";
+    std::ifstream file(m_mem_file_path);
+    if (!file.is_open()) {
+        std::cerr << "ERROR: cannot open mem trace for indexing: " << m_mem_file_path << std::endl;
+        exit(1);
+    }
+
+    m_block_mem_offsets.clear();
+    std::string line;
+    while (true) {
+        std::streampos offset = file.tellg();
+        if (!std::getline(file, line)) {
+            break;
+        }
+        if (!is_memory_trace_line(line)) {
+            continue;
+        }
+        const std::size_t pos_split = line.find_first_of(' ');
+        if (pos_split == std::string::npos) {
+            continue;
+        }
+        const int block_id = std::stoi(line.substr(0, pos_split));
+        m_block_mem_offsets[block_id].push_back(offset);
+    }
+
+    m_block_mem_index_ready = true;
+}
+
+const std::vector<std::streampos> *trace_reader::get_block_mem_offsets(int block_id) const {
+    if (!m_block_mem_index_ready) {
+        std::cerr << "ERROR: block mem index requested before build" << std::endl;
+        exit(1);
+    }
+    auto it = m_block_mem_offsets.find(block_id);
+    if (it == m_block_mem_offsets.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+const std::string &trace_reader::get_mem_file_path() const {
+    if (!m_block_mem_index_ready) {
+        std::cerr << "ERROR: mem file path requested before block mem index build" << std::endl;
+        exit(1);
+    }
+    return m_mem_file_path;
 }
 
 
@@ -203,7 +278,5 @@ void trace_reader::read_all_block_sass(const string &benchmark_path, kernel_info
         }
     }
 }
-
-
 
 

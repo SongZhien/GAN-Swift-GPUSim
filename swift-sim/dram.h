@@ -69,6 +69,7 @@ class dram_t {
 public:
 
     dram_t(const memory_config *config, const gpu* gpu, unsigned id);
+    ~dram_t();
 
     bool full() const;
 

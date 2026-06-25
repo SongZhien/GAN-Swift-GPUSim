@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+ <key>clang_version</key>
+<string>Ubuntu clang version 20.1.8 (++20250708082409+6fb913d3e2ec-1~exp1~20250708202428.132)</string>
+ <key>diagnostics</key>
+ <array>
+  <dict>
+   <key>path</key>
+   <array>
+    <dict>
+     <key>kind</key><string>event</string>
+     <key>location</key>
+     <dict>
+      <key>line</key><integer>34</integer>
+      <key>col</key><integer>5</integer>
+      <key>file</key><integer>0</integer>
+     </dict>
+     <key>ranges</key>
+     <array>
+       <array>
+        <dict>
+         <key>line</key><integer>34</integer>
+         <key>col</key><integer>11</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+        <dict>
+         <key>line</key><integer>34</integer>
+         <key>col</key><integer>15</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+       </array>
+     </array>
+     <key>depth</key><integer>0</integer>
+     <key>extended_message</key>
+     <string>Value stored to &apos;v&apos; is never read</string>
+     <key>message</key>
+     <string>Value stored to &apos;v&apos; is never read</string>
+    </dict>
+   </array>
+   <key>description</key><string>Value stored to &apos;v&apos; is never read</string>
+   <key>category</key><string>Unused code</string>
+   <key>type</key><string>Dead increment</string>
+   <key>check_name</key><string>deadcode.DeadStores</string>
+   <!-- This hash is experimental and going to change! -->
+   <key>issue_hash_content_of_line_in_context</key><string>b8ada20383982102d3733c4d40c6148c</string>
+  <key>issue_context_kind</key><string>function</string>
+  <key>issue_context</key><string>LOGB2</string>
+  <key>issue_hash_function_offset</key><string>19</string>
+  <key>location</key>
+  <dict>
+   <key>line</key><integer>34</integer>
+   <key>col</key><integer>5</integer>
+   <key>file</key><integer>0</integer>
+  </dict>
+  <key>ExecutedLines</key>
+  <dict>
+   <key>0</key>
+   <array>
+    <integer>34</integer>
+   </array>
+  </dict>
+  </dict>
+  <dict>
+   <key>path</key>
+   <array>
+    <dict>
+     <key>kind</key><string>event</string>
+     <key>location</key>
+     <dict>
+      <key>line</key><integer>266</integer>
+      <key>col</key><integer>32</integer>
+      <key>file</key><integer>0</integer>
+     </dict>
+     <key>ranges</key>
+     <array>
+       <array>
+        <dict>
+         <key>line</key><integer>266</integer>
+         <key>col</key><integer>32</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+        <dict>
+         <key>line</key><integer>266</integer>
+         <key>col</key><integer>41</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+       </array>
+       <array>
+        <dict>
+         <key>line</key><integer>266</integer>
+         <key>col</key><integer>45</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+        <dict>
+         <key>line</key><integer>266</integer>
+         <key>col</key><integer>75</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+       </array>
+     </array>
+     <key>depth</key><integer>0</integer>
+     <key>extended_message</key>
+     <string>Value stored to &apos;block_addr&apos; during its initialization is never read</string>
+     <key>message</key>
+     <string>Value stored to &apos;block_addr&apos; during its initialization is never read</string>
+    </dict>
+   </array>
+   <key>description</key><string>Value stored to &apos;block_addr&apos; during its initialization is never read</string>
+   <key>category</key><string>Unused code</string>
+   <key>type</key><string>Dead initialization</string>
+   <key>check_name</key><string>deadcode.DeadStores</string>
+   <!-- This hash is experimental and going to change! -->
+   <key>issue_hash_content_of_line_in_context</key><string>6697f3af60f19901645f2d9fc4923d4b</string>
+  <key>issue_context_kind</key><string>C++ method</string>
+  <key>issue_context</key><string>cache_access</string>
+  <key>issue_hash_function_offset</key><string>61</string>
+  <key>location</key>
+  <dict>
+   <key>line</key><integer>266</integer>
+   <key>col</key><integer>32</integer>
+   <key>file</key><integer>0</integer>
+  </dict>
+  <key>ExecutedLines</key>
+  <dict>
+   <key>0</key>
+   <array>
+    <integer>266</integer>
+   </array>
+  </dict>
+  </dict>
+  <dict>
+   <key>path</key>
+   <array>
+    <dict>
+     <key>kind</key><string>event</string>
+     <key>location</key>
+     <dict>
+      <key>line</key><integer>303</integer>
+      <key>col</key><integer>31</integer>
+      <key>file</key><integer>0</integer>
+     </dict>
+     <key>ranges</key>
+     <array>
+       <array>
+        <dict>
+         <key>line</key><integer>303</integer>
+         <key>col</key><integer>31</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+        <dict>
+         <key>line</key><integer>303</integer>
+         <key>col</key><integer>40</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+       </array>
+       <array>
+        <dict>
+         <key>line</key><integer>303</integer>
+         <key>col</key><integer>44</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+        <dict>
+         <key>line</key><integer>303</integer>
+         <key>col</key><integer>74</integer>
+         <key>file</key><integer>0</integer>
+        </dict>
+       </array>
+     </array>
+     <key>depth</key><integer>0</integer>
+     <key>extended_message</key>
+     <string>Value stored to &apos;block_addr&apos; during its initialization is never read</string>
+     <key>message</key>
+     <string>Value stored to &apos;block_addr&apos; during its initialization is never read</string>
+    </dict>
+   </array>
+   <key>description</key><string>Value stored to &apos;block_addr&apos; during its initialization is never read</string>
+   <key>category</key><string>Unused code</string>
+   <key>type</key><string>Dead initialization</string>
+   <key>check_name</key><string>deadcode.DeadStores</string>
+   <!-- This hash is experimental and going to change! -->
+   <key>issue_hash_content_of_line_in_context</key><string>07e19a5cf3c995a9c9ce5d7463b53724</string>
+  <key>issue_context_kind</key><string>C++ method</string>
+  <key>issue_context</key><string>cache_access</string>
+  <key>issue_hash_function_offset</key><string>98</string>
+  <key>location</key>
+  <dict>
+   <key>line</key><integer>303</integer>
+   <key>col</key><integer>31</integer>
+   <key>file</key><integer>0</integer>
+  </dict>
+  <key>ExecutedLines</key>
+  <dict>
+   <key>0</key>
+   <array>
+    <integer>303</integer>
+   </array>
+  </dict>
+  </dict>
+ </array>
+ <key>files</key>
+ <array>
+  <string>cache.cpp</string>
+ </array>
+</dict>
+</plist>

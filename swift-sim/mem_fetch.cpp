@@ -14,6 +14,7 @@ mem_fetch::mem_fetch(unsigned sm_id, bool access_type, new_addr_type address, un
     m_sector_mask = sector_mask;
     m_space = space;
     m_is_atomic = is_atomic;
+    m_no_reply = false;
     m_gen_time = gen_time;
     m_src_block_id = src_block_id;
     m_src_warp_id = src_warp_id;
@@ -21,7 +22,8 @@ mem_fetch::mem_fetch(unsigned sm_id, bool access_type, new_addr_type address, un
     m_status = INIT;
     m_write_type = NORMAL;
     m_sector_address = m_address + sector_mask * SECTOR_SIZE;
-    m_packet_size = 0; 
+    m_tlb_hit = false;
+    m_packet_size = SECTOR_SIZE; 
     m_l1_ready_time = 0;
     m_l2_ready_time = 0;
     m_gpu = p_gpu;

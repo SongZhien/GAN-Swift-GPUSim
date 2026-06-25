@@ -114,6 +114,30 @@ class fifo_pipeline {
     return data;
   }
 
+  T* pop_no_replenish() {
+    fifo_data<T>* next;
+    T* data;
+    if (m_head) {
+      next = m_head->m_next;
+      data = m_head->m_data;
+      if (m_head == m_tail) {
+        assert(next == NULL);
+        m_tail = NULL;
+      }
+      delete m_head;
+      m_head = next;
+      m_length--;
+      m_n_element--;
+      if (m_length == 0) {
+        assert(m_head == NULL);
+        m_tail = m_head;
+      }
+    } else {
+      data = NULL;
+    }
+    return data;
+  }
+
   T* top() const {
     if (m_head) {
       return m_head->m_data;

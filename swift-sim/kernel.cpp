@@ -3,6 +3,7 @@
 //
 
 #include "kernel.h"
+#include "trace_reader.h"
 #include <algorithm>
 
 void kernel::init_blocks() {
@@ -56,16 +57,32 @@ void warp::get_inst_dependency() {
 }
 
 
-void block::read_mem(const string &trace_path, int l1_cache_line_size, int block_id) {
-    std::ifstream mem_trace(
-            trace_path + "/kernel-" + std::to_string(m_kernel_id) + "-block-" + std::to_string(block_id) + ".mem",
-            std::ios::in);
+void block::read_mem(trace_reader &reader, int l1_cache_line_size, int block_id) {
+    const std::vector<std::streampos> *offsets = reader.get_block_mem_offsets(block_id);
+    if (offsets == nullptr || offsets->empty()) {
+        return;
+    }
+    std::ifstream mem_trace(reader.get_mem_file_path(), std::ios::in);
+    if (!mem_trace.is_open()) {
+        std::cerr << "ERROR: cannot open indexed mem trace: " << reader.get_mem_file_path() << std::endl;
+        exit(1);
+    }
     string line;
     unsigned sector_num = 0;
     std::map<int, std::map<long long, int> > block_pc_num;  // warp_id:{pc:pc_num}
-    while (std::getline(mem_trace, line)) {
+    for (const std::streampos &offset : *offsets) {
+        mem_trace.clear();
+        mem_trace.seekg(offset);
+        if (!std::getline(mem_trace, line)) {
+            continue;
+        }
         if (line != "\n") {
             if (line != "====") {
+                std::size_t pos_split = line.find_first_of(' ');
+                if (pos_split == std::string::npos) {
+                    continue;
+                }
+                line = line.substr(pos_split + 1);
                 std::istringstream is(line);
                 std::string str;
                 std::queue<std::string> tmp_str;
@@ -118,8 +135,8 @@ void block::read_mem(const string &trace_path, int l1_cache_line_size, int block
     }
 }
 
-void block::load_mem_request(const string &trace_path, int l1_cache_line_size, int block_id) {
-    read_mem(trace_path, l1_cache_line_size, block_id);
+void block::load_mem_request(trace_reader &reader, int l1_cache_line_size, int block_id) {
+    read_mem(reader, l1_cache_line_size, block_id);
     for (auto &warp: warp_vec) {
         warp.second->m_mem_inst = mem_inst_map[warp.second->m_warp_id];
     }
@@ -132,6 +149,3 @@ bool block::is_active(int cycles) {
 unsigned l1_bank_hash(mem_fetch *mf) {
     return mf->m_sector_mask;
 }
-
-
-

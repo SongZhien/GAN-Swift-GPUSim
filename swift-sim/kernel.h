@@ -30,6 +30,7 @@ using std::string;
 // class static_warp;
 class warp;
 class streaming_multiprocessor;
+class trace_reader;
 
 
 const unsigned WARP_PER_CTA_MAX = 64;
@@ -117,10 +118,11 @@ public:
         m_active_thread_num = m_trace_inst.m_active_thread_num;
         m_dest_num = m_trace_inst.m_dest_num;
         m_dest_regs = m_trace_inst.m_dest_regs;
-        if (m_trace_inst.m_opcode.find('.') != string::npos) {
-            m_opcode = m_trace_inst.m_opcode.substr(0, m_trace_inst.m_opcode.find('.'));
+        m_full_opcode = m_trace_inst.m_opcode;
+        if (m_full_opcode.find('.') != string::npos) {
+            m_opcode = m_full_opcode.substr(0, m_full_opcode.find('.'));
         } else {
-            m_opcode = m_trace_inst.m_opcode;
+            m_opcode = m_full_opcode;
         }
         m_src_num = m_trace_inst.m_src_num;
         m_src_regs = m_trace_inst.m_src_regs;
@@ -138,6 +140,7 @@ public:
     int m_active_thread_num;
     int m_dest_num;
     std::vector<std::string> m_dest_regs;
+    std::string m_full_opcode;
     std::string m_opcode;
     int m_src_num;
     std::vector<std::string> m_src_regs;
@@ -164,6 +167,12 @@ public:
         thread_mask = 0;
         m_pending_mem_request_num = 0;
         pending_inst = 0;
+    }
+
+    ~warp() {
+        for (auto *mem_inst_ptr : m_mem_inst) {
+            delete mem_inst_ptr;
+        }
     }
 
 
@@ -263,11 +272,20 @@ public:
         m_warp_at_barrier.reset();
     }
 
+    ~block() {
+        for (auto &warp_entry : warp_vec) {
+            delete warp_entry.second;
+        }
+        for (auto *warp_ptr : retired_warps) {
+            delete warp_ptr;
+        }
+    }
+
     bool is_active(int);
 
-    void read_mem(const string &trace_path, int l1_cache_line_size, int block_id);
+    void read_mem(trace_reader &reader, int l1_cache_line_size, int block_id);
 
-    void load_mem_request(const string &trace_path, int l1_cache_line_size, int block_id);
+    void load_mem_request(trace_reader &reader, int l1_cache_line_size, int block_id);
 
     warp *get_warp(int warp_id) {
         if(warp_vec.find(warp_id)!=warp_vec.end()){
@@ -282,6 +300,7 @@ public:
 
     std::map<int, std::vector<mem_inst *>> mem_inst_map;
     std::map<int, warp *> warp_vec;
+    std::vector<warp *> retired_warps;
     bool m_active;
     int m_actual_end;
     std::bitset<WARP_PER_CTA_MAX> m_warp_at_barrier;
@@ -294,6 +313,12 @@ public:
         m_kernel_id = kernel_id;
         block_pointer = 0;
         request_nums = 0;
+    }
+
+    ~kernel() {
+        for (auto &block_entry : m_blocks) {
+            delete block_entry.second;
+        }
     }
 
     void init_blocks();

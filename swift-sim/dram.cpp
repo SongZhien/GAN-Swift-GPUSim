@@ -21,7 +21,7 @@ id(id){
     WTRc = 0;
     rw = READ;  // read mode is default
     bkgrp = (bankgrp_t **)calloc(sizeof(bankgrp_t *), m_config->nbkgrp);
-    bkgrp[0] = (bankgrp_t *)calloc(sizeof(bank_t), m_config->nbkgrp);
+    bkgrp[0] = (bankgrp_t *)calloc(sizeof(bankgrp_t), m_config->nbkgrp);
     for (unsigned i = 1; i < m_config->nbkgrp; i++) {
         bkgrp[i] = bkgrp[0] + i;
     }
@@ -52,12 +52,43 @@ id(id){
     bank_accesses = new unsigned[m_config->nbk]();
 }
 
+dram_t::~dram_t() {
+    while (!rwq->empty()) {
+        dram_req_t *cmd = rwq->pop_no_replenish();
+        if (cmd) {
+            delete cmd;
+        }
+    }
+    while (!mrqq->empty()) {
+        dram_req_t *cmd = mrqq->pop_no_replenish();
+        if (cmd) {
+            delete cmd;
+        }
+    }
+    while (!returnq->empty()) {
+        returnq->pop_no_replenish();
+    }
+    delete rwq;
+    delete mrqq;
+    delete returnq;
+    delete[] bank_accesses;
+    if (bk) {
+        free(bk[0]);
+        free(bk);
+    }
+    if (bkgrp) {
+        free(bkgrp[0]);
+        free(bkgrp);
+    }
+}
+
 void dram_t::cycle() {
     if (!returnq->full()) {
         dram_req_t *cmd = rwq->pop();
         if (cmd) {
                 mem_fetch *data = cmd->data;
                 returnq->push(data);
+                delete cmd;
         }
     }
 

@@ -14,6 +14,7 @@ public:
         m_compute_capability = o.m_compute_capability;
         l1_cache_config = o.l1_cache_config;
         l2_cache_config = o.l2_cache_config;
+        memory_config = o.memory_config;
         gpu_isa_latency = o.gpu_isa_latency;
     }
 
@@ -22,8 +23,8 @@ public:
     static void config_split(const std::string &str, const std::string &pattern, std::string &str1, std::string &str2);
 
     void read_m_config() {
-        read_config("/mnt/sda/xu/bishe/swiftsim/single-chip/swift-sim/gpu.config");
-        read_config("/mnt/sda/xu/bishe/swiftsim/single-chip/swift-sim/gpu_isa_latency.config");
+        read_config("./gpu.config");
+        read_config("./gpu_isa_latency.config");
     }
 
     std::map<std::string, std::string> m_gpu_config = {};
@@ -35,4 +36,4 @@ public:
     std::map<std::string, std::tuple<int, std::string> > gpu_isa_latency = {};
 };
 
-#endif 
+#endif
