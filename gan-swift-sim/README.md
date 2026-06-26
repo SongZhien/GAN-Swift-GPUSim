@@ -1,280 +1,293 @@
-# Swift-GPUSim `swift-sim`
+# GAN-Swift-sim
 
-这个目录下的程序是一个以 `kernel-N.sass` 和 `kernel-N.mem` 为输入的 trace-driven GPU 模拟器。
+GAN-Swift-sim is a trace-driven GPU simulator. It executes GPU kernel traces and
+reports simulated cycle counts, instruction counts, cache behavior, and SM stall
+breakdowns for workload-level analysis.
 
-当前版本已支持：
+The simulator in this directory is the main simulation component of the
+repository. The NVBit tracing utilities are kept separately under
+`../tracer_nvbit`.
 
-- 连续执行 kernel：`./flex-gpu-origin <benchmark> <kernel_num>`
-- 区间执行 kernel：`./flex-gpu-origin <benchmark> <kernel_begin> <kernel_end>`
-- 通过 `.g` 文件执行指定 kernel 子集：`./flex-gpu-origin <benchmark> --g <kernels.g>`
-- 固定并发上限 + 槽位补齐
-- 运行中输出：
-  - `[WORKLOAD]`
-  - `[START]`
-  - `[DONE]`
-  - `completed_gpu_cycles`
+## Features
 
-## Trace 路径
+- Simulates kernels from SASS and memory trace files.
+- Supports automatic discovery of all kernels in a workload trace directory.
+- Supports running a fixed number of kernels, an explicit kernel range, or a
+  sampled kernel list from a `.g` file.
+- Runs multiple kernels concurrently with a configurable concurrency limit.
+- Models configurable SM resources, Tensor Core units, uniform datapath units,
+  L1/L2 caches, memory partitions, MSHRs, and DRAM-related timing parameters.
+- Reports per-kernel and workload-level metrics including GPU cycles, SM cycles,
+  issue-active cycles, memory stalls, dependency stalls, unit stalls, and
+  scheduler idle cycles.
 
-程序优先通过环境变量 `SWIFTSIM_TRACE_PATH` 查找 trace；如果没有设置，则回退到 [gpu.h](/home/lxz/Swift-GPUSim/swift-sim/gpu.h) 中的默认路径 `DEFAULT_TRACE_PATH`。
-
-```cpp
-#define DEFAULT_TRACE_PATH "/home/lxz/traces_disk/swift_traces/"
-```
-
-对于 benchmark `foo`，程序会读取：
-
-```text
-<TRACE_PATH>/foo/traces/kernel-N.sass
-<TRACE_PATH>/foo/traces/kernel-N.mem
-```
-当前版本不再在运行时生成 `kernel-N-block-M.mem`。程序会直接基于 `kernel-N.mem` 建立按 block 的轻量索引，并按需读取对应 block 的访存记录。
-
-你可以用两种方式设置环境变量：
-
-### 方式 A：当前 shell 会话内先导出
-
-```bash
-export SWIFTSIM_TRACE_PATH=/your/trace/root
-cd /home/lxz/Swift-GPUSim/swift-sim
-./flex-gpu-origin llama
-```
-
-### 方式 B：单条命令前临时设置
-
-```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
-SWIFTSIM_TRACE_PATH=/your/trace/root ./flex-gpu-origin llama
-```
-
-## 必需文件
-
-`swift-sim` 真正需要的 trace 文件是：
-
-- `kernel-N.sass`
-- `kernel-N.mem`
-
-可选文件：
-
-- `.g`
-  - 只在你想运行某个 kernel 子集时使用
-
-程序不会要求 `kernel-N-block-M.mem`，也不会在运行时生成它们。
-
-程序不会直接读取 `.trace.xz` 内容；如果使用 `.g`，只是从 `.g` 的每一行里提取 `kernel-<id>`。
-
-## 编译
-
-```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
-make
-```
-
-生成的可执行文件是：
+## Directory Layout
 
 ```text
-/home/lxz/Swift-GPUSim/swift-sim/flex-gpu-origin
+<repo-root>/
+├── gan-swift-sim/
+│   ├── Makefile
+│   ├── README.md
+│   ├── *.cpp / *.h
+│   ├── gpu.config
+│   ├── gpu.config_3080
+│   └── gpu_isa_latency.config
+└── tracer_nvbit/
 ```
 
-## 执行方式
+Important files in `gan-swift-sim`:
 
-### 1. 自动执行该 workload 下全部 kernel
+- `main.cpp`: command-line parsing, kernel selection, concurrent execution, and
+  workload progress output.
+- `gpu.h` / `gpu.cpp`: GPU model construction and simulation loop.
+- `kernel.h` / `kernel.cpp`: kernel, block, warp, instruction, and memory
+  request handling.
+- `trace_reader.h` / `trace_reader.cpp`: SASS and memory trace parsing.
+- `cache.h` / `cache.cpp`: L1/L2 cache, MSHR, memory partition, and DRAM routing
+  logic.
+- `config_reader.h` / `config_reader.cpp`: simulator configuration loading.
+- `gpu.config`: default GPU architecture and memory-system configuration.
+- `gpu_isa_latency.config`: instruction latency and execution-unit mapping.
+
+## Trace Layout
+
+GAN-Swift-sim expects each benchmark to have the following trace layout:
+
+```text
+<trace-root>/<benchmark>/traces/kernel-<id>.sass
+<trace-root>/<benchmark>/traces/kernel-<id>.mem
+```
+
+For example, benchmark `cfd` with kernel `7` should provide:
+
+```text
+<trace-root>/cfd/traces/kernel-7.sass
+<trace-root>/cfd/traces/kernel-7.mem
+```
+
+The simulator reads `kernel-<id>.mem` directly and builds an in-memory index for
+per-block memory records. It does not require pre-generated
+`kernel-<id>-block-<block-id>.mem` files.
+
+## Trace Root Configuration
+
+The recommended way to select a trace root is to set the trace-path environment
+variable before running the simulator:
 
 ```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
+export SWIFTSIM_TRACE_PATH=<trace-root>
+```
+
+The environment variable name is kept for compatibility with the current source
+code. Project-facing documentation and directory names use `GAN-Swift-sim`.
+
+If the environment variable is not set, the simulator falls back to
+`DEFAULT_TRACE_PATH` in `gpu.h`. For portable experiments, prefer setting the
+environment variable instead of relying on a machine-specific default path.
+
+## Build
+
+Build from the simulator directory so relative configuration paths resolve
+correctly:
+
+```bash
+cd <repo-root>/gan-swift-sim
+make clean
+make -j"$(nproc)"
+```
+
+The build produces:
+
+```text
+<repo-root>/gan-swift-sim/flex-gpu-origin
+```
+
+To remove generated objects and the executable:
+
+```bash
+cd <repo-root>/gan-swift-sim
+make clean
+```
+
+## Run
+
+Run all commands from `gan-swift-sim` unless you also adjust the relative config
+paths in the source code.
+
+### Run All Kernels in a Benchmark
+
+```bash
+cd <repo-root>/gan-swift-sim
+export SWIFTSIM_TRACE_PATH=<trace-root>
 ./flex-gpu-origin <benchmark>
 ```
 
-示例：
-
-```bash
-export SWIFTSIM_TRACE_PATH=/path/to/trace_root
-cd /home/lxz/Swift-GPUSim/swift-sim
-./flex-gpu-origin llama
-```
-
-程序会自动扫描：
+The simulator scans:
 
 ```text
-$SWIFTSIM_TRACE_PATH/<benchmark>/traces/
+<trace-root>/<benchmark>/traces/
 ```
 
-下面真实存在的 `kernel-N.sass` / `kernel-N.mem`，然后按编号执行全部 kernel。
+and runs every kernel for which it finds `kernel-<id>.sass` or
+`kernel-<id>.mem`.
 
-### 2. 从 `kernel-1` 开始执行前 `N` 个 kernel
+### Run the First N Kernels
 
 ```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
+cd <repo-root>/gan-swift-sim
+export SWIFTSIM_TRACE_PATH=<trace-root>
 ./flex-gpu-origin <benchmark> <kernel_num>
 ```
 
-示例：
+This runs `kernel-1` through `kernel-<kernel_num>`.
+
+Example:
 
 ```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
 ./flex-gpu-origin cfd 300
 ```
 
-### 3. 执行区间 kernel
+### Run a Kernel Range
 
 ```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
+cd <repo-root>/gan-swift-sim
+export SWIFTSIM_TRACE_PATH=<trace-root>
 ./flex-gpu-origin <benchmark> <kernel_begin> <kernel_end>
 ```
 
-示例：
+This runs every kernel in the inclusive range
+`kernel-<kernel_begin>` through `kernel-<kernel_end>`.
+
+Example:
 
 ```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
 ./flex-gpu-origin cfd 10 20
 ```
 
-这表示执行：
-
-- `kernel-10`
-- `kernel-11`
-- ...
-- `kernel-20`
-
-### 4. 通过 `.g` 执行采样选中的 kernel
+### Run Kernels Listed in a `.g` File
 
 ```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
+cd <repo-root>/gan-swift-sim
+export SWIFTSIM_TRACE_PATH=<trace-root>
 ./flex-gpu-origin <benchmark> --g <kernels.g>
 ```
 
-示例：
+The `.g` file may contain one kernel reference per line. The simulator extracts
+the numeric kernel id from strings containing `kernel-<id>`.
 
-```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
-SWIFTSIM_TRACE_PATH=/path/to/trace_root ./flex-gpu-origin cfd --g /path/to/sampled_kernels.g
-```
-
-`.g` 文件要求：
-
-- 一行一个 kernel 名
-- 行内容可以是：
-  - `kernel-7.trace`
-  - `kernel-7-ctx_xxx.trace.xz`
-  - 其他包含 `kernel-7` 的字符串
-- 程序只会提取里面的 kernel 编号 `7`
-
-## 并发执行
-
-最大并发 kernel 数由 [main.cpp](/home/lxz/Swift-GPUSim/swift-sim/main.cpp) 中的常量控制：
-
-```cpp
-static const std::size_t MAX_CONCURRENT_KERNELS = 8;
-```
-
-当前调度方式不是静态分批，而是：
-
-- 最多同时运行 `MAX_CONCURRENT_KERNELS` 个 kernel
-- 某个 kernel 完成后，立即补下一个未执行 kernel
-
-如果你要降低内存压力，可以把它改小，例如改成：
-
-```cpp
-static const std::size_t MAX_CONCURRENT_KERNELS = 4;
-```
-
-改完后重新编译：
-
-```bash
-cd /home/lxz/Swift-GPUSim/swift-sim
-make
-```
-
-## 运行输出说明
-
-### 运行开始时
+Valid examples:
 
 ```text
-[WORKLOAD] benchmark=cfd total_kernels=300 max_concurrent_kernels=8
+kernel-7.trace
+kernel-7.trace.xz
+path/to/kernel-7-context.trace.xz
 ```
 
-表示：
+Only the kernel id is used. The simulator does not read `.trace.xz` content
+directly.
 
-- 当前 benchmark 名
-- 本次一共要运行多少个 kernel
-- 当前最大并发数
+## Runtime Output
 
-### 某个 kernel 启动时
+At workload start:
 
 ```text
-[START] kernel=29 started=29/300 finished=12/300
+[WORKLOAD] benchmark=<benchmark> total_kernels=<N> max_concurrent_kernels=<M>
 ```
 
-表示：
-
-- `kernel=29`：当前启动的 kernel 编号
-- `started`：已经启动过多少个 kernel
-- `finished`：已经完成多少个 kernel
-
-### 某个 kernel 完成时
+For each kernel start:
 
 ```text
-[DONE] kernel=29 gpu_sim_cycle=3748 completed_gpu_cycles=17071 finished=4/300
+[START] kernel=<id> started=<started>/<total> finished=<finished>/<total>
 ```
 
-表示：
+For each completed kernel:
 
-- `gpu_sim_cycle`
-  - 这个 kernel 自己的模拟周期数
-- `completed_gpu_cycles`
-  - 到当前为止，所有已完成 kernel 的 `gpu_sim_cycle` 累计值
-- `finished`
-  - 已完成 kernel 数
-
-### 每个 kernel 的详细统计
-
-每个 kernel 完成后还会打印：
-
-- `gpu_sim_cycle`
-- `gpu_sim_insn`
-- `total_sm_cycles`
-- `total_thread_inst`
-- `total_thread_ldst_inst`
-- `total_warp_inst`
-- `total_ldst_warp_inst`
-- L1 / L2 cache stats
-- `total_time`
-
-其中：
-
-- `gpu_sim_cycle`
-  - 单个 kernel 的全局模拟周期
-- `total_sm_cycles`
-  - 所有 SM 累积工作周期，不是 kernel 的全局完成时间
-- `total_time`
-  - 宿主机上这次仿真实际花费的时间，单位 `us`
-  - 不是模拟出来的 GPU cycle
-
-## 迁移到其他服务器
-
-需要确认两件事：
-
-### 1. trace 根目录
-
-最推荐的方式是设置环境变量：
-
-```bash
-export SWIFTSIM_TRACE_PATH=/your/trace/root
+```text
+[DONE] kernel=<id> gpu_sim_cycle=<cycles> gpu_sim_insn=<insts> active_sm_cycles=<cycles> issue_active_sm_cycles=<cycles> memory_stall_sm_cycles=<cycles> dependency_stall_sm_cycles=<cycles> unit_stall_sm_cycles=<cycles> scheduler_idle_sm_cycles=<cycles> total_sm_cycles=<cycles> completed_gpu_cycles=<cycles> finished=<finished>/<total>
 ```
 
-如果不想用环境变量，再修改 [gpu.h](/home/lxz/Swift-GPUSim/swift-sim/gpu.h) 中的：
+At workload completion:
 
-```cpp
-#define DEFAULT_TRACE_PATH "..."
+```text
+[WORKLOAD_DONE] benchmark=<benchmark> finished_kernels=<finished>/<total> completed_gpu_cycles=<cycles> completed_active_sm_cycles=<cycles> completed_issue_active_sm_cycles=<cycles> completed_memory_stall_sm_cycles=<cycles> completed_dependency_stall_sm_cycles=<cycles> completed_unit_stall_sm_cycles=<cycles> completed_scheduler_idle_sm_cycles=<cycles> completed_sm_cycles=<cycles> total_host_time <time> us
 ```
 
-### 2. 配置文件位置
+Additional per-kernel timing lines are printed after each kernel:
 
-[config_reader.h](/home/lxz/Swift-GPUSim/swift-sim/config_reader.h) 当前使用相对路径：
+```text
+preprocess_time <time> us
+gpu_cycle_time <time> us
+total_time <time> us
+kernel_total_host_time <time> us
+```
 
-```cpp
+Metric notes:
+
+- `gpu_sim_cycle`: simulated global cycle count for one kernel.
+- `gpu_sim_insn`: simulated instruction count for one kernel.
+- `active_sm_cycles`: accumulated resident-active SM cycles.
+- `issue_active_sm_cycles`: accumulated SM cycles with useful issue activity.
+- `memory_stall_sm_cycles`: accumulated cycles attributed to memory stalls.
+- `dependency_stall_sm_cycles`: accumulated cycles attributed to dependency
+  stalls.
+- `unit_stall_sm_cycles`: accumulated cycles attributed to execution-unit
+  contention.
+- `scheduler_idle_sm_cycles`: accumulated cycles attributed to scheduler idle
+  behavior.
+- `total_sm_cycles`: accumulated SM cycles across all SMs.
+- `total_host_time` and `kernel_total_host_time`: wall-clock runtime on the host
+  machine, in microseconds.
+
+## Configuration
+
+The simulator reads configuration files from the current working directory:
+
+```text
 ./gpu.config
 ./gpu_isa_latency.config
 ```
 
-因此通常只要在 `swift-sim` 目录内执行程序即可。
+For that reason, run the executable from `gan-swift-sim`.
+
+The default `gpu.config` currently describes an Ampere-style GPU model with:
+
+- `sm_num:46`
+- `mem_num:16`
+- `l2_cache_sub_partitions:16`
+- Tensor pipeline entries such as `TC_units` and `TENSOR_units`
+- Uniform datapath entries such as `UDP_units`
+- Configurable L1 cache, L2 cache, MSHR, and DRAM parameters
+
+Use `gpu.config_3080` as an alternate starting point when evaluating a different
+GPU configuration. After changing configuration values, rebuild if the change is
+paired with source-code edits; otherwise rerun the executable from the simulator
+directory.
+
+## Kernel Concurrency
+
+The maximum number of concurrently simulated kernels is controlled in
+`main.cpp`:
+
+```cpp
+static const std::size_t MAX_CONCURRENT_KERNELS = 32;
+```
+
+Lower this value if a workload requires too much host memory. Rebuild after
+changing the constant:
+
+```bash
+cd <repo-root>/gan-swift-sim
+make clean
+make -j"$(nproc)"
+```
+
+## Development Notes
+
+- Keep trace data outside the repository and pass its location through the trace
+  root environment variable.
+- Avoid committing generated files such as `*.o`, `flex-gpu-origin`, temporary
+  logs, and large trace outputs.
+- Use relative repository paths in documentation and scripts so the project can
+  be moved between machines without editing hard-coded user directories.
+- When comparing with hardware counters, record both resident-active metrics and
+  issue/stall breakdown metrics; they describe different aspects of execution.
